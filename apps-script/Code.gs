@@ -22,7 +22,8 @@ const TZ = 'Asia/Ho_Chi_Minh';
 const PRODUCT_SHEET = 'SAN_PHAM';
 const BATCH_SHEET = 'DOT_DAT';
 const LEGACY_ORDER_SHEET = 'DON_HANG';
-const PRODUCT_HEADERS = ['ID', 'TÊN BÁNH', 'GIÁ', 'TỒN KHO', 'ĐANG BÁN', 'ẢNH URL', 'MÔ TẢ'];
+const PRODUCT_HEADERS = ['ID', 'TÊN BÁNH', 'GIÁ', 'TỒN KHO', 'ĐANG BÁN', 'ẢNH URL', 'MÔ TẢ', 'ALBUM ẢNH'];
+const MAX_ALBUM = 20;
 const BATCH_HEADERS = ['MÃ ĐỢT', 'TÊN ĐỢT', 'NGÀY NHẬN BÁNH', 'HẠN CHỐT ĐƠN', 'TRẠNG THÁI', 'SỐ LƯỢNG MỞ BÁN', 'GHI CHÚ', 'TÊN SHEET', 'NGÀY TẠO'];
 const ORDER_HEADERS = ['MÃ ĐƠN', 'THỜI GIAN', 'TÊN KHÁCH', 'SĐT', 'SẢN PHẨM', 'TỔNG SL', 'TỔNG TIỀN', 'THANH TOÁN', 'TRẠNG THÁI', 'GHI CHÚ', 'CHI TIẾT JSON', 'ẢNH THANH TOÁN'];
 const ORDER_STATUSES = ['CHỜ XÁC NHẬN', 'ĐÃ NHẬN TIỀN', 'ĐANG LÀM', 'HOÀN THÀNH', 'HỦY'];
@@ -55,6 +56,7 @@ function routeGet_(p) {
     case 'products': return legacyProducts_();             // trang cũ
     case 'shop': return shop_(p.batch);
     case 'lookup': return lookup_(p.batch, p.phone);
+    case 'mine': return mine_(p.ids);
     case 'admin-challenge': return challenge_();
     case 'admin-login': return login_(p.nonce, p.proof);
     case 'admin-data': auth_(p.token); return adminData_(p.batch);
@@ -68,6 +70,7 @@ function routePost_(p) {
     case 'admin-status': return setOrderStatus_(p.orderId, p.status, p.batch);
     case 'admin-save-product': return saveProduct_(JSON.parse(p.product || '{}'));
     case 'admin-delete-product': return deleteProduct_(p.productId);
+    case 'admin-album': return updateAlbum_(JSON.parse(p.albumData || '{}'));
     case 'admin-create-batch': return createBatch_(JSON.parse(p.batchData || '{}'));
     case 'admin-update-batch': return updateBatch_(JSON.parse(p.batchData || '{}'));
     default: return { success: false, message: 'API không hợp lệ' };
@@ -141,13 +144,25 @@ function saveImage_(dataUrl, fileName, propKey, folderName, share) {
 
 /* ======================= DATA ======================= */
 
-function getProducts_() {
+function productSheet_() {
   const sh = sheet_(PRODUCT_SHEET, PRODUCT_HEADERS);
+  if (String(sh.getRange(1, 8).getValue()).trim() !== PRODUCT_HEADERS[7]) {
+    sh.getRange(1, 8).setValue(PRODUCT_HEADERS[7]).setFontWeight('bold');
+  }
+  return sh;
+}
+
+function parseAlbum_(v) {
+  return String(v || '').split(/[\s,]+/).filter(function (u) { return /^https:\/\//.test(u); });
+}
+
+function getProducts_() {
+  const sh = productSheet_();
   return dataRows_(sh).map(function (r, i) {
     return {
       row: i + 2, id: String(r[0]).trim(), name: String(r[1]).trim(), price: num_(r[2]), stock: num_(r[3]),
       active: r[4] === true || String(r[4]).toUpperCase() === 'TRUE',
-      imageUrl: String(r[5] || ''), desc: String(r[6] || '')
+      imageUrl: String(r[5] || ''), desc: String(r[6] || ''), album: parseAlbum_(r[7])
     };
   }).filter(function (p) { return p.id; });
 }
@@ -235,7 +250,7 @@ function remaining_(b, products, orders) {
   });
   return products.filter(function (p) { return b.limits[p.id] !== undefined; }).map(function (p) {
     const limit = num_(b.limits[p.id]), sold = used[p.id] || 0;
-    return { id: p.id, name: p.name, price: p.price, imageUrl: p.imageUrl, desc: p.desc, active: p.active, limit: limit, sold: sold, stock: Math.max(0, limit - sold) };
+    return { id: p.id, name: p.name, price: p.price, imageUrl: p.imageUrl, desc: p.desc, album: p.album, active: p.active, limit: limit, sold: sold, stock: Math.max(0, limit - sold) };
   });
 }
 
@@ -262,12 +277,11 @@ function legacyProducts_() {
 }
 
 function shop_(code) {
-  const all = getBatches_();
-  let visible = all.filter(function (b) { return b.status !== 'KẾT THÚC'; });
-  const b = all.filter(function (x) { return x.code === code; })[0] || defaultBatch_(visible.length ? visible : all);
+  // Khách chỉ thấy đợt hiện tại (đang nhận đơn hoặc đã chốt đang làm bánh); đợt KẾT THÚC chỉ admin thấy
+  const visible = getBatches_().filter(function (x) { return x.status !== 'KẾT THÚC'; }).sort(function (a, c) { return pickupKey_(a) - pickupKey_(c); });
+  const firstOpen = visible.filter(isOpen_)[0];
+  const b = visible.filter(function (x) { return x.code === code; })[0] || firstOpen || visible[visible.length - 1];
   if (!b) return { success: true, batches: [], batch: null, products: [], orders: [] };
-  if (visible.indexOf(b) < 0) visible.push(b);
-  visible.sort(function (a, c) { return pickupKey_(a) - pickupKey_(c); });
   const orders = getOrders_(b);
   return {
     success: true,
@@ -281,10 +295,28 @@ function shop_(code) {
 function lookup_(code, phone) {
   const ph = digits_(phone);
   if (ph.length < 8) return { success: false, message: 'Số điện thoại chưa đúng' };
-  const b = getBatches_().filter(function (x) { return x.code === code; })[0];
-  if (!b) return { success: false, message: 'Không tìm thấy đợt' };
-  const ids = getOrders_(b).filter(function (o) { return digits_(o.phone) === ph; }).map(function (o) { return o.id; });
-  return { success: true, ids: ids };
+  const found = [];
+  getBatches_().filter(function (b) { return b.status !== 'KẾT THÚC'; }).forEach(function (b) {
+    getOrders_(b).forEach(function (o) { if (digits_(o.phone) === ph) found.push({ id: o.id, batch: b.code }); });
+  });
+  return { success: true, ids: found.filter(function (x) { return x.batch === code; }).map(function (x) { return x.id; }), orders: found };
+}
+
+/* Khách xem lại đơn của chính mình (kể cả khi đợt đã chốt, trừ đợt đã kết thúc) */
+function mine_(ids) {
+  const want = String(ids || '').split(',').map(function (x) { return x.trim(); }).filter(String).slice(0, 30);
+  if (!want.length) return { success: true, orders: [] };
+  const out = [];
+  getBatches_().filter(function (b) { return b.status !== 'KẾT THÚC'; }).forEach(function (b) {
+    getOrders_(b).forEach(function (o) {
+      if (want.indexOf(o.id) >= 0) {
+        const x = orderPublic_(o);
+        x.batch = b.code; x.batchName = b.name; x.pickupText = fmt_(b.pickupDate, 'dd/MM/yyyy'); x.batchOpen = isOpen_(b);
+        out.push(x);
+      }
+    });
+  });
+  return { success: true, orders: out };
 }
 
 function placeOrder_(d) {
@@ -380,7 +412,7 @@ function adminData_(code) {
     success: true,
     batches: sorted.map(function (x) { const o = batchPublic_(x); o.limits = x.limits; o.sheetName = x.sheetName; return o; }),
     batch: b ? (function () { const o = batchPublic_(b); o.limits = b.limits; o.sheetName = b.sheetName; return o; })() : null,
-    products: products.map(function (p) { return { id: p.id, name: p.name, price: p.price, stock: p.stock, active: p.active, imageUrl: p.imageUrl, desc: p.desc }; }),
+    products: products.map(function (p) { return { id: p.id, name: p.name, price: p.price, stock: p.stock, active: p.active, imageUrl: p.imageUrl, desc: p.desc, album: p.album }; }),
     orders: orders.map(function (o) {
       return { id: o.id, timeText: o.timeText, name: o.name, phone: o.phone, items: o.items, qty: o.qty, total: o.total, payment: o.payment, status: o.status, note: o.note, paymentImage: o.paymentImage, detail: o.detail };
     }).reverse(),
@@ -415,7 +447,7 @@ function setOrderStatus_(orderId, status, code) {
 function saveProduct_(p) {
   const id = String(p.id || '').trim();
   if (!id || !String(p.name || '').trim()) throw new Error('Thiếu mã hoặc tên bánh');
-  const sh = sheet_(PRODUCT_SHEET, PRODUCT_HEADERS);
+  const sh = productSheet_();
   const existing = getProducts_().filter(function (x) { return x.id === id; })[0];
   let imageUrl = existing ? existing.imageUrl : '';
   if (p.imageData) {
@@ -426,6 +458,27 @@ function saveProduct_(p) {
   if (existing) sh.getRange(existing.row, 1, 1, row.length).setValues([row]);
   else sh.appendRow(row);
   return { success: true };
+}
+
+function updateAlbum_(d) {
+  const p = getProducts_().filter(function (x) { return x.id === String(d.productId || '').trim(); })[0];
+  if (!p) throw new Error('Không tìm thấy sản phẩm');
+  let album = p.album.filter(function (u) { return (d.remove || []).indexOf(u) < 0; });
+  (d.add || []).forEach(function (img, i) {
+    if (album.length >= MAX_ALBUM) return;
+    const f = saveImage_(img, p.id + '-album-' + Date.now() + '-' + i + '.jpg', 'PRODUCT_FOLDER_ID', 'NHÀ NGÔ - ẢNH SẢN PHẨM', true);
+    if (f) album.push('https://drive.google.com/thumbnail?id=' + f.getId() + '&sz=w1600');
+  });
+  if (d.cover && (album.indexOf(d.cover) >= 0 || d.cover === p.imageUrl)) {
+    const sh = productSheet_();
+    if (d.cover !== p.imageUrl) {
+      album = album.filter(function (u) { return u !== d.cover; });
+      if (p.imageUrl) album.unshift(p.imageUrl);
+      sh.getRange(p.row, 6).setValue(d.cover);
+    }
+  }
+  productSheet_().getRange(p.row, 8).setValue(album.join('\n'));
+  return { success: true, album: album };
 }
 
 function deleteProduct_(id) {
