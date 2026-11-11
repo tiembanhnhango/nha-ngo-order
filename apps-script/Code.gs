@@ -60,6 +60,7 @@ function routeGet_(p) {
     case 'admin-challenge': return challenge_();
     case 'admin-login': return login_(p.nonce, p.proof);
     case 'admin-data': auth_(p.token); return adminData_(p.batch);
+    case 'admin-image': auth_(p.token); return paymentImage_(p.id);
     default: return { success: false, message: 'API không hợp lệ' };
   }
 }
@@ -418,6 +419,20 @@ function adminData_(code) {
     }).reverse(),
     summary: b ? remaining_(b, products, orders) : []
   };
+}
+
+/* Admin xem ảnh chuyển khoản qua Apps Script – folder ảnh vẫn giữ riêng tư */
+function paymentImage_(id) {
+  id = String(id || '').trim();
+  if (!/^[\w-]{10,}$/.test(id)) throw new Error('Mã ảnh không hợp lệ');
+  const folderId = PropertiesService.getScriptProperties().getProperty('PAYMENT_FOLDER_ID');
+  const file = DriveApp.getFileById(id);
+  const parents = file.getParents();
+  let ok = false;
+  while (parents.hasNext()) { if (parents.next().getId() === folderId) ok = true; }
+  if (!ok) throw new Error('Ảnh không nằm trong thư mục ảnh thanh toán');
+  const blob = file.getBlob();
+  return { success: true, dataUrl: 'data:' + (blob.getContentType() || 'image/jpeg') + ';base64,' + Utilities.base64Encode(blob.getBytes()) };
 }
 
 function setOrderStatus_(orderId, status, code) {
