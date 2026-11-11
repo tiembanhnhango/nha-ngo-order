@@ -321,10 +321,11 @@ function placeOrder_(d) {
 
     const sh = b ? orderSheet_(b) : sheet_(LEGACY_ORDER_SHEET, ORDER_HEADERS);
     sh.appendRow([
-      code, new Date(), String(d.name || '').trim(), (b ? '' : "'") + String(d.phone || '').trim(),
+      code, new Date(), String(d.name || '').trim(), '',
       items.map(function (x) { return x.name + ' x' + x.qty; }).join(', '), qty, total,
       file ? 'Khách báo đã chuyển' : 'Chưa có ảnh', 'CHỜ XÁC NHẬN', note, JSON.stringify(items), file ? file.getUrl() : ''
     ]);
+    sh.getRange(sh.getLastRow(), 4).setNumberFormat('@').setValue(String(d.phone || '').trim()); // giữ số 0 đầu SĐT
 
     if (!b) { // chế độ cũ (chưa có đợt): trừ tồn kho trực tiếp
       const psh = sheet_(PRODUCT_SHEET, PRODUCT_HEADERS);
